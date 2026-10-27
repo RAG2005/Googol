@@ -1,16 +1,72 @@
 import sys
 import Pyro5.api
 import threading
+import sqlite3
 
 @Pyro5.api.expose
 class Barrel:
-    def __init__(self):
+    def __init__(self, db_path="barrel.db"):
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.executescript("""
+                            CREATE TABLE IF NOT EXISTS pages(
+                                url TEXT PRIMARY KEY,
+                                title TEXT,
+                                snippet TEXT,
+                            );
+                                
+                            CREATE TABLE IF NOT EXITSTS word_index(
+                                word TEXT,
+                                url TEXT,
+                                smippet TEXT
+                            );
+                            
+                            CREATE TABLE IF NOT EXISTS backlinks(
+                                link TEXT,
+                                url TEXT,
+                                PRIMARY KEY(link, url)
+                            );
+                            
+                            CREATE TABLE IF NOT EXISTS seen(
+                                url TEXT PRIMARY KEY
+                            );
+                            
+                            CREATE TABLE IF NOT EXISTS queue(
+                                url TEXT PRIMARY KEY,
+                                position INTEGER UNIQUE
+                            );""")
+        self.db.commit()
         self.index = {}
         self.pages = {}
         self.backlinks = {}
         self.por_visitar = []
         self.vistos = set()
+        self.load_data()
         self.lock = threading.Lock()
+        
+        
+    def load_data(self):
+        with self.lock:
+            for url, title, snippet in self.db.execute("SELECT url, title, snippet FROM pages"):
+                self.pages[url] = {
+                    "title": title,
+                    "snippet": snippet
+                }
+            
+            for word, url in self.db.execute("SELECT word, url FROM word_index"):
+                self.index.setdefault(word, set()).add(url)
+                
+            for link, url in self.db.execute("SELECT link FROM backlinks"):
+                self.backlinks.setdefault(link, set()).add(url)
+                
+            self.vistos = {
+                row[0] for row in self.db.execute("SELECT url FROM seen")
+            }
+            
+            self.por_visitar = [
+                row[0] for row in self.db.execute("SELECT url FROM queue ORDER BY position")
+            ]
+                
 
     def add_page(self, url, title, snippet, words, links):
         self.pages[url] = {"title": title, "snippet": snippet}
