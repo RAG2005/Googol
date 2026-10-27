@@ -23,12 +23,18 @@ def backlinks(gateway):
     for u in gateway.get_backlinks(url):
         print(u)
 
+def indexar_url(gateway):
+    url = input("URL: ")
+    gateway.add_url(url)
+    print("URL enviado")
+
 while True:
     print("1 - Pesquisar")
     print("2 - Backlinks")
-    print("3 - Sair")
+    print("3 - Indexar URL")
+    print("4 - Sair")
     opcao = input("> ")
-    if opcao == "3":
+    if opcao == "4":
         break
     try:
         gateway = Pyro5.api.Proxy("PYRONAME:gateway")
@@ -36,7 +42,9 @@ while True:
             pesquisar(gateway)
         elif opcao == "2":
             backlinks(gateway)
+        elif opcao == "3":
+            indexar_url(gateway)
     except Exception as e:
-        print("Erro: ", e)
+        print("ERRO: ", e)
 
 
