@@ -8,3 +8,9 @@ lxml>=5.0
  
 # Testes
 pytest>=8.0
+
+stopwordsiso
+
+
+
+# sites que bloqueiam pedidos automaticos nao sao indexados

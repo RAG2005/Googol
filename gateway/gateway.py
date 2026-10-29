@@ -34,10 +34,28 @@ class Gateway:
         raise Exception("Nenhum barrel disponivel")
 
     def add_url(self, url):
-        return self.chamar_primario("add_url", url)
+        confirmados = 0
+        for nome in self.barrel_names:
+            try:
+                with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
+                    if barrel.add_url(url):
+                        confirmados += 1
+            except Exception:
+                print(nome, "falhou")
+        if confirmados == 0:
+            raise Exception("Nenhum barrel disponivel")
+        return True
 
     def get_url(self):
-        return self.chamar_primario("get_url")
+        url = self.chamar_primario("get_url")
+        if url is not None:
+            for nome in self.barrel_names:
+                try:
+                    with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
+                        barrel.remover_url(url)
+                except Exception:
+                    print(nome, "falhou")
+        return url
 
 def main():
     daemon = Pyro5.api.Daemon()

@@ -41,14 +41,27 @@ def processar_pagina(url):
     return titulo, citacao, palavras, list(links)
 
 barrels = ["barrel1", "barrel2"]
+pendentes = []
+
+def enviar(nome, url, titulo, citacao, palavras, links):
+    try:
+        with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
+            return barrel.add_page(url, titulo, citacao, palavras, links)
+    except Exception:
+        return False
 
 def enviar_aos_barrels(url, titulo, citacao, palavras, links):
     for nome in barrels:
-        try:
-            with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                barrel.add_page(url, titulo, citacao, palavras, links)
-        except Exception:
-            print(nome, "falhou")
+        if not enviar(nome, url, titulo, citacao, palavras, links):
+            print(nome, "sem ACK, fica pendente")
+            pendentes.append((nome, url, titulo, citacao, palavras, links))
+
+def reenviar_pendentes():
+    for item in pendentes[:]:
+        nome, url, titulo, citacao, palavras, links = item
+        if enviar(nome, url, titulo, citacao, palavras, links):
+            pendentes.remove(item)
+            print("reenviado a", nome)
 
 def tratar_url(gateway, url):
     resultado = processar_pagina(url)
@@ -68,7 +81,6 @@ def main():
             time.sleep(1)
         else:
             tratar_url(gateway, url)
-
 
 if __name__ == "__main__":
     main()

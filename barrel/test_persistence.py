@@ -1,65 +1,43 @@
-
 import os
-import tempfile
-
 from barrel import Barrel
 
+def barrel_novo(ficheiro):
+    if os.path.exists(ficheiro):
+        os.remove(ficheiro)
+    return Barrel(ficheiro)
 
-def test_persistence():
-    # Criar uma base de dados temporária
-    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    db_path = temp.name
-    temp.close()
+def test_persistencia():
+    b = barrel_novo("teste1.db")
+    b.add_page("http://exemplo.pt", "Teste", "citacao", ["python", "sqlite"], ["http://outro.pt"])
+    b.add_url("http://fila.pt")
 
-    try:
-        # 1. Criar o Barrel e guardar dados
-        barrel = Barrel(db_path)
+    b2 = Barrel("teste1.db")
+    assert b2.pages["http://exemplo.pt"]["title"] == "Teste"
+    assert "http://exemplo.pt" in b2.index["python"]
+    assert "http://exemplo.pt" in b2.backlinks["http://outro.pt"]
+    assert "http://fila.pt" in b2.vistos
+    assert b2.por_visitar == ["http://fila.pt"]
 
-        barrel.add_page(
-            "https://exemplo.pt",
-            "Página de teste",
-            "Um exemplo de persistência",
-            ["python", "sqlite", "teste"],
-            ["https://outro.pt"]
-        )
+def test_fila_apos_get_url():
+    b = barrel_novo("teste2.db")
+    b.add_url("A")
+    b.add_url("B")
+    assert b.get_url() == "A"
+    b.add_url("C")
 
-        barrel.add_url("https://fila.pt")
+    b2 = Barrel("teste2.db")
+    assert b2.por_visitar == ["B", "C"]
 
-        # Confirmar que os dados existem em memória
-        assert "https://exemplo.pt" in barrel.pages
-        assert "python" in barrel.index
-        assert "https://fila.pt" in barrel.vistos
-
-        # Fechar a primeira instância
-        barrel.close()
-
-        # 2. Criar uma nova instância com a mesma base de dados
-        barrel2 = Barrel(db_path)
-
-        # 3. Confirmar que os dados foram recuperados
-        assert "https://exemplo.pt" in barrel2.pages
-        assert barrel2.pages["https://exemplo.pt"]["title"] == "Página de teste"
-
-        assert "https://exemplo.pt" in barrel2.index["python"]
-        assert "https://exemplo.pt" in barrel2.backlinks["https://outro.pt"]
-
-        assert "https://fila.pt" in barrel2.vistos
-        assert "https://fila.pt" in barrel2.por_visitar
-
-        print("SUCESSO: a persistência funciona!")
-
-        barrel2.close()
-
-    finally:
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-        if os.path.exists(db_path + "-wal"):
-            os.remove(db_path + "-wal")
-
-        if os.path.exists(db_path + "-shm"):
-            os.remove(db_path + "-shm")
-
+def test_stop_words():
+    b = barrel_novo("teste3.db")
+    b.add_page("http://a", "A", "citacao", ["o", "python", "the"], [])
+    assert "o" not in b.index
+    assert "the" not in b.index
+    assert len(b.search(["o", "python"])) == 1
+    assert b.search(["o"]) == []
 
 if __name__ == "__main__":
-    test_persistence()
+    test_persistencia()
+    test_fila_apos_get_url()
+    test_stop_words()
+    print("SUCESSO")
