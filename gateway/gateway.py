@@ -1,7 +1,11 @@
+<<<<<<< Updated upstream
+=======
 import random
 import Pyro5.api
 import threading
-
+import sqlite3
+import time
+import os
 
 @Pyro5.api.expose
 class Gateway:
@@ -12,9 +16,17 @@ class Gateway:
         self.pesquisas = 0
         self.downloads = 0
         self.erros = 0
-        
         self.urls_na_fila = 0
+        
         self.stats_lock = threading.Lock()
+        self.db_lock = threading.Lock()
+        self.db=sqlite3.connect("gateway.db", check_same_thread=False, timeout=10)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("CREATE TABLE IF NOT EXISTS tasks (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', claimed_at REAL, worker_id TEXT, attempts INTEGER NOT NULL DEFAULT 0)")
+        self.db.commit()
+        
+        
+        
 
     def chamar_barrel(self, metodo, *args):
         nomes = self.barrel_names[:]
@@ -44,36 +56,93 @@ class Gateway:
                 print(nome, "falhou")
         raise Exception("Nenhum barrel disponivel")
 
+
     def add_url(self, url):
-        confirmados = 0
-        for nome in self.barrel_names:
-            try:
-                with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                    if barrel.add_url(url):
-                        confirmados += 1
-            except Exception:
-                print(nome, "falhou")
-        if confirmados == 0:
-            raise Exception("Nenhum barrel disponivel")
+        with self.db_lock:
+            cursor = self.db.execute("""
+                INSERT OR IGNORE INTO tasks (url, status)
+                VALUES (?, 'pending')
+            """, (url,))
+            self.db.commit()
+
+            added = cursor.rowcount > 0
+
+        if added:
+            with self.stats_lock:
+                self.urls_submetidos += 1
+                self.urls_na_fila += 1
+
         return True
 
-    def get_url(self):
-        url = self.chamar_primario("get_url")
-        if url is not None:
-            with self.stats_lock:
-                self.downloads += 1
-                
-                if self.urls_na_fila > 0:
-                    self.urls_na_fila -= 1
-                    
-            for nome in self.barrel_names:
-                try:
-                    with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                        barrel.remover_url(url)
-                except Exception:
-                    print(nome, "falhou")
+
+    def get_url(self, worker_id):
+        now = time.time()
+        lease_seconds = 60
+
+        with self.db_lock:
+            self.db.execute("BEGIN IMMEDIATE")
+
+            try:
+                self.db.execute("""
+                    UPDATE tasks
+                    SET status = 'pending',
+                        claimed_at = NULL,
+                        worker_id = NULL
+                    WHERE status = 'processing'
+                    AND claimed_at < ?
+                """, (now - lease_seconds,))
+
+                row = self.db.execute("""
+                    SELECT url
+                    FROM tasks
+                    WHERE status = 'pending'
+                    ORDER BY attempts, url
+                    LIMIT 1
+                """).fetchone()
+
+                if row is None:
+                    self.db.commit()
+                    return None
+
+                url = row[0]
+
+                self.db.execute("""
+                    UPDATE tasks
+                    SET status = 'processing',
+                        claimed_at = ?,
+                        worker_id = ?,
+                        attempts = attempts + 1
+                    WHERE url = ? AND status = 'pending'
+                """, (now, worker_id, url))
+
+                self.db.commit()
+
+            except Exception:
+                self.db.rollback()
+                raise
+
+        with self.stats_lock:
+            self.downloads += 1
+
         return url
-    
+
+
+    def ack_url(self, url, worker_id):
+        with self.db_lock:
+            cursor = self.db.execute("""
+                UPDATE tasks
+                SET status = 'done',
+                    claimed_at = NULL,
+                    worker_id = NULL
+                WHERE url = ?
+                AND status = 'processing'
+                AND worker_id = ?
+            """, (url, worker_id))
+
+            self.db.commit()
+            return cursor.rowcount == 1
+
+        
     
     def get_stats(self):
         with self.stats_lock:
@@ -109,3 +178,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+>>>>>>> Stashed changes

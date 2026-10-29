@@ -1,3 +1,5 @@
+<<<<<<< Updated upstream
+=======
 import Pyro5.api
 import time
 import os
@@ -48,6 +50,9 @@ def estatisticas(gateway):
         except Exception as e:
             print("Erro ao obter estatísticas:", e)
             return
+        
+
+
 
 
 def backlinks(gateway):
@@ -85,3 +90,4 @@ while True:
 
 
 
+>>>>>>> Stashed changes
