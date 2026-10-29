@@ -1,11 +1,20 @@
 import random
 import Pyro5.api
+import threading
 
 
 @Pyro5.api.expose
 class Gateway:
     def __init__(self):
         self.barrel_names = ["barrel1", "barrel2"]
+        
+        self.urls_submetidos = 0
+        self.pesquisas = 0
+        self.downloads = 0
+        self.erros = 0
+        
+        self.urls_na_fila = 0
+        self.stats_lock = threading.Lock()
 
     def chamar_barrel(self, metodo, *args):
         nomes = self.barrel_names[:]
@@ -19,6 +28,8 @@ class Gateway:
         raise Exception("Nenhum SB disponível")
 
     def search(self, terms, page=0):
+        with self.stats_lock:
+            self.pesquisas += 1
         return self.chamar_barrel("search", terms, page)
 
     def get_backlinks(self, url):
@@ -49,6 +60,12 @@ class Gateway:
     def get_url(self):
         url = self.chamar_primario("get_url")
         if url is not None:
+            with self.stats_lock:
+                self.downloads += 1
+                
+                if self.urls_na_fila > 0:
+                    self.urls_na_fila -= 1
+                    
             for nome in self.barrel_names:
                 try:
                     with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
@@ -56,6 +73,31 @@ class Gateway:
                 except Exception:
                     print(nome, "falhou")
         return url
+    
+    
+    def get_stats(self):
+        with self.stats_lock:
+            stats = {
+                "urls_submetidos": self.urls_submetidos,
+                "urls_na_fila": self.urls_na_fila,
+                "pesquisas": self.pesquisas,
+                "downloads": self.downloads,
+                "erros": self.erros
+            }
+        ativos = 0
+
+        for nome in self.barrel_names:
+            try:
+                with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
+                    barrel._pyroBind()
+                    ativos += 1
+            except Exception:
+                pass
+
+        stats["barrels_ativos"] = ativos
+
+        return stats
+        
 
 def main():
     daemon = Pyro5.api.Daemon()
