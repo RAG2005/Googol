@@ -56,8 +56,11 @@ class Gateway:
 
         return self.chamar_barrel("search", terms, page)
 
-    def get_backlinks(self, url):
-        return self.chamar_barrel("get_backlinks", url)
+    def backlinks():
+        url = input("URL: ")
+
+        for u in chamar_gateway("get_backlinks", url):
+            print(u)
 
     def chamar_primario(self, metodo, *args):
         for nome in self.barrel_names:
@@ -263,7 +266,9 @@ class Gateway:
         with self.stats_lock:
             self.stats_callbacks = callbacks_validos
                 
-                
+    def ping(self):
+        return True
+    
     def registar_callback(self, callback_uri):
         with self.stats_lock:
             if callback_uri not in self.stats_callbacks:
@@ -276,6 +281,9 @@ class Gateway:
             callback.update_stats(stats)
 
         print("Novo cliente registado para estatísticas")
+        
+        
+        
 def main():
     daemon = Pyro5.api.Daemon()
     uri = daemon.register(Gateway())

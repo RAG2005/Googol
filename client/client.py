@@ -4,11 +4,14 @@ import time
 import os
 import queue
 import threading
-def pesquisar(gateway):
+import Pyro5.errors
+
+
+def pesquisar():
     terms = input("Termos: ").split()
     page = 0
     while True:
-        resultados = gateway.search(terms, page)
+        resultados = chamar_gateway("search", terms, page)
         if not resultados:
             print("Sem resultados")
             return
@@ -32,7 +35,8 @@ class StatsCallback:
         self.fila.put(stats)
         
 
-def estatisticas(gateway):
+
+def estatisticas():
     callback = StatsCallback()
 
     daemon = Pyro5.api.Daemon(host="localhost")
@@ -44,47 +48,79 @@ def estatisticas(gateway):
     )
     thread.start()
 
+    ligado = False
+
     try:
-        gateway._pyroTimeout = 5
-        gateway.registar_callback(str(callback_uri))
-
         while True:
+
+            # Registar ou voltar a registar o callback
+            if not ligado:
+                try:
+                    with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                        gateway._pyroTimeout = 5
+                        gateway.registar_callback(str(callback_uri))
+
+                    ligado = True
+                    print("Ligação ao Gateway estabelecida.")
+
+                except (
+                    Pyro5.errors.CommunicationError,
+                    Pyro5.errors.NamingError,
+                    TimeoutError
+                ) as erro:
+                    print("Gateway indisponível:", erro)
+                    print("Nova tentativa em 3 segundos...")
+                    time.sleep(3)
+                    continue
+
             try:
-                stats = callback.fila.get(timeout=1)
-            except queue.Empty:
-                continue
+                stats = callback.fila.get(timeout=3)
 
-            os.system("cls" if os.name == "nt" else "clear")
+                os.system("cls" if os.name == "nt" else "clear")
 
-            print("========== ESTATÍSTICAS ==========")
-            for nome, valor in stats.items():
-                if nome == "barrels":
-                    print("\nBarrels:")
-                    for barrel in valor:
-                        print("-", barrel)
+                print("========== ESTATÍSTICAS ==========")
 
-                elif nome == "ultimas_pesquisas":
-                    print("\nÚltimas 10 pesquisas:")
-                    if valor:
-                        for i, pesquisa in enumerate(valor, 1):
-                            print(f"{i}. {pesquisa}")
+                for nome, valor in stats.items():
+                    if nome == "barrels":
+                        print("\nBarrels:")
+                        for barrel in valor:
+                            print("-", barrel)
+
+                    elif nome == "ultimas_pesquisas":
+                        print("\nÚltimas 10 pesquisas:")
+                        if valor:
+                            for i, pesquisa in enumerate(valor, 1):
+                                print(f"{i}. {pesquisa}")
+                        else:
+                            print("Ainda não foram efetuadas pesquisas.")
+
                     else:
-                        print("Ainda não foram efetuadas pesquisas.")
+                        print(f"{nome}: {valor}")
 
-                else:
-                    print(f"{nome}: {valor}")
+                print("\nPrima CTRL+C para voltar ao menu.")
 
-            print("\nPrima CTRL+C para voltar ao menu.")
+            except queue.Empty:
+                # Verificar se o Gateway continua ligado
+                try:
+                    with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                        gateway._pyroTimeout = 5
+                        gateway.ping()
+
+                except (
+                    Pyro5.errors.CommunicationError,
+                    Pyro5.errors.NamingError,
+                    TimeoutError
+                ):
+                    print("\nGateway desligado! A tentar restabelecer ligação...")
+                    ligado = False
 
     except KeyboardInterrupt:
         print("\nA voltar ao menu...")
 
-    except Exception as e:
-        print("ERRO NAS ESTATÍSTICAS:", repr(e))
-
     finally:
         daemon.shutdown()
         daemon.close()
+
 
     
 
@@ -102,10 +138,29 @@ def backlinks(gateway):
     for u in gateway.get_backlinks(url):
         print(u)
 
-def indexar_url(gateway):
+def indexar_url():
     url = input("URL: ")
-    gateway.add_url(url)
+    chamar_gateway("add_url", url)
     print("URL enviado")
+    
+
+def chamar_gateway(metodo, *args):
+    while True:
+        try:
+            with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                gateway._pyroTimeout = 5
+                return getattr(gateway, metodo)(*args)
+
+        except (
+            Pyro5.errors.CommunicationError,
+            Pyro5.errors.NamingError,
+            TimeoutError
+        ) as erro:
+            print("\nGateway indisponível:", erro)
+            print("Nova tentativa em 3 segundos...")
+            time.sleep(3)
+
+
 
 while True:
     print("1 - Pesquisar")
@@ -113,21 +168,30 @@ while True:
     print("3 - Indexar URL")
     print("4 - Estatísticas")
     print("5 - Sair")
+
     opcao = input("> ")
+
     if opcao == "5":
         break
+
     try:
-        gateway = Pyro5.api.Proxy("PYRONAME:gateway")
         if opcao == "1":
-            pesquisar(gateway)
+            pesquisar()
+
         elif opcao == "2":
-            backlinks(gateway)
+            backlinks()
+
         elif opcao == "3":
-            indexar_url(gateway)
+            indexar_url()
+
         elif opcao == "4":
-            estatisticas(gateway)
-        
+            estatisticas()
+
+    except KeyboardInterrupt:
+        print("\nOperação cancelada.")
+
     except Exception as e:
-        print("ERRO: ", e)
+        print("ERRO:", e)
+
 
 
