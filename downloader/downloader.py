@@ -10,6 +10,23 @@ worker_id = f"{socket.gethostname()}-{uuid.uuid4()}"
 
 def processar_pagina(url):
     print("A processar:", url)
+    
+    try:
+        if not url or not url.strip():
+            print("ERRO: URL vazio.")
+            return None
+
+        resposta = requests.get(
+            url,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+    except requests.exceptions.RequestException as erro:
+        print("ERRO HTTP:", repr(erro))
+        return None
 
     try:
         resposta = requests.get(
@@ -208,6 +225,10 @@ def main():
                             "Tarefa será recuperada após o timeout:",
                             url
                         )
+                
+                except KeyboardInterrupt:
+                    print("\nDownloader encerrado pelo utilizador.")
+                    break
 
                 except Exception as erro:
                     gateway.registar_erro()

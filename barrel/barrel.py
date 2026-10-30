@@ -77,6 +77,12 @@ class Barrel:
             return list(self.backlinks.get(url, []))
 
     def add_url(self, url):
+        url = url.strip() if isinstance(url, str) else ""
+
+        if not url:
+            print("URL vazio ignorado.")
+            return False
+        
         with self.lock:
             if url in self.vistos:
                 return True

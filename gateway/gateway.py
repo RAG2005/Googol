@@ -22,6 +22,8 @@ class Gateway:
         self.db=sqlite3.connect("gateway.db", check_same_thread=False, timeout=10)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS tasks (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', claimed_at REAL, worker_id TEXT, attempts INTEGER NOT NULL DEFAULT 0)")
+        with self.db_lock:
+            self.db.execute("DELETE FROM tasks WHERE TRIM(url) = ''")
         self.stats_callbacks = []
         self.cached_stats = {}
         self.atualizar_stats()
