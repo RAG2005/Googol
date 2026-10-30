@@ -15,12 +15,16 @@ class Gateway:
         self.downloads = 0
         self.erros = 0
         self.urls_na_fila = 0
+        self.ultimas_pesquisas = []
         
         self.stats_lock = threading.Lock()
         self.db_lock = threading.Lock()
         self.db=sqlite3.connect("gateway.db", check_same_thread=False, timeout=10)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS tasks (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', claimed_at REAL, worker_id TEXT, attempts INTEGER NOT NULL DEFAULT 0)")
+        self.stats_callbacks = []
+        self.cached_stats = {}
+        self.atualizar_stats()
         self.db.commit()
         
         
@@ -38,8 +42,16 @@ class Gateway:
         raise Exception("Nenhum SB disponível")
 
     def search(self, terms, page=0):
-        with self.stats_lock:
-            self.pesquisas += 1
+        if page == 0:
+            pesquisa = " ".join(terms) if isinstance(terms, (list, tuple)) else str(terms)
+
+            with self.stats_lock:
+                self.pesquisas += 1
+                self.ultimas_pesquisas.insert(0, pesquisa)
+                self.ultimas_pesquisas = self.ultimas_pesquisas[:10]
+
+            self.atualizar_stats()
+
         return self.chamar_barrel("search", terms, page)
 
     def get_backlinks(self, url):
@@ -69,6 +81,7 @@ class Gateway:
             with self.stats_lock:
                 self.urls_submetidos += 1
                 self.urls_na_fila += 1
+            self.atualizar_stats()
 
         return True
 
@@ -92,6 +105,7 @@ class Gateway:
         if confirmado:
             with self.stats_lock:
                 self.downloads += 1
+            self.atualizar_stats()
 
         return confirmado
 
@@ -186,14 +200,80 @@ class Gateway:
                 with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
                     barrel._pyroBind()
                     ativos += 1
+                    self.atualizar_stats()
             except Exception:
                 pass
 
         stats["barrels_ativos"] = ativos
 
         return stats
-        
+    
+    def atualizar_stats(self):
+        with self.db_lock:
+            pendentes = self.db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
+            ).fetchone()[0]
 
+            processing = self.db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'processing'"
+            ).fetchone()[0]
+
+            concluidas = self.db.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
+            ).fetchone()[0]
+
+        with self.stats_lock:
+            stats = {
+                "urls_submetidos": self.urls_submetidos,
+                "urls_na_fila": pendentes,
+                "urls_em_processamento": processing,
+                "urls_concluidas": concluidas,
+                "pesquisas": self.pesquisas,
+                "downloads": self.downloads,
+                "erros": self.erros,
+                "barrels": self.barrel_names.copy(),
+                "ultimas_pesquisas": self.ultimas_pesquisas.copy()
+            }
+
+            if stats == self.cached_stats:
+                return
+
+            self.cached_stats = stats.copy()
+            callbacks = self.stats_callbacks[:]
+
+        print("A enviar estatísticas:", stats)
+        print("Clientes registados:", len(callbacks))
+
+        callbacks_validos = []
+
+        for callback_uri in callbacks:
+            try:
+                with Pyro5.api.Proxy(callback_uri) as callback:
+                    callback._pyroTimeout = 5
+                    callback.update_stats(stats)
+
+                callbacks_validos.append(callback_uri)
+                print("Estatísticas enviadas com sucesso.")
+
+            except Exception as e:
+                print("Erro ao notificar cliente:", repr(e))
+
+        with self.stats_lock:
+            self.stats_callbacks = callbacks_validos
+                
+                
+    def registar_callback(self, callback_uri):
+        with self.stats_lock:
+            if callback_uri not in self.stats_callbacks:
+                self.stats_callbacks.append(callback_uri)
+
+            stats = self.cached_stats.copy()
+
+        with Pyro5.api.Proxy(callback_uri) as callback:
+            callback._pyroTimeout = 5
+            callback.update_stats(stats)
+
+        print("Novo cliente registado para estatísticas")
 def main():
     daemon = Pyro5.api.Daemon()
     uri = daemon.register(Gateway())

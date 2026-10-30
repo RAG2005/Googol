@@ -32,6 +32,7 @@ def processar_pagina(url):
 
     except Exception as erro:
         print("ERRO inesperado no download:", url, repr(erro))
+        
         return None
 
     if resposta.status_code != 200:
@@ -140,7 +141,7 @@ def reenviar_pendentes():
 
 def tratar_url(gateway, url):
     print("\n==============================")
-    print("PROCESSANDO:", url)
+    print("A PROCESSAR:", url)
     print("==============================")
 
     resultado = processar_pagina(url)
@@ -209,14 +210,16 @@ def main():
                         )
 
                 except Exception as erro:
+                    gateway.registar_erro()
                     print("Erro a processar", url, erro)
 
-        except (Pyro5.errors.CommunicationError,
-                Pyro5.errors.NamingError) as erro:
+        except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError) as erro:
+            gateway.registar_erro()
             print("Gateway indisponível:", erro)
             time.sleep(3)
 
         except Exception as erro:
+            gateway.registar_erro()
             print("Erro inesperado:", erro)
             time.sleep(2)
 
