@@ -1,5 +1,3 @@
-<<<<<<< Updated upstream
-=======
 import random
 import Pyro5.api
 import threading
@@ -75,9 +73,31 @@ class Gateway:
         return True
 
 
+    def ack_url(self, url, worker_id):
+        with self.db_lock:
+            cursor = self.db.execute("""
+                UPDATE tasks
+                SET status = 'done',
+                    claimed_at = NULL,
+                    worker_id = NULL
+                WHERE url = ?
+                AND status = 'processing'
+                AND worker_id = ?
+            """, (url, worker_id))
+
+            self.db.commit()
+
+            confirmado = cursor.rowcount == 1
+
+        if confirmado:
+            with self.stats_lock:
+                self.downloads += 1
+
+        return confirmado
+
     def get_url(self, worker_id):
         now = time.time()
-        lease_seconds = 60
+        lease_seconds = 30
 
         with self.db_lock:
             self.db.execute("BEGIN IMMEDIATE")
@@ -106,14 +126,19 @@ class Gateway:
 
                 url = row[0]
 
-                self.db.execute("""
+                cursor = self.db.execute("""
                     UPDATE tasks
                     SET status = 'processing',
                         claimed_at = ?,
                         worker_id = ?,
                         attempts = attempts + 1
-                    WHERE url = ? AND status = 'pending'
+                    WHERE url = ?
+                    AND status = 'pending'
                 """, (now, worker_id, url))
+
+                if cursor.rowcount != 1:
+                    self.db.rollback()
+                    return None
 
                 self.db.commit()
 
@@ -121,38 +146,39 @@ class Gateway:
                 self.db.rollback()
                 raise
 
-        with self.stats_lock:
-            self.downloads += 1
-
         return url
-
-
-    def ack_url(self, url, worker_id):
-        with self.db_lock:
-            cursor = self.db.execute("""
-                UPDATE tasks
-                SET status = 'done',
-                    claimed_at = NULL,
-                    worker_id = NULL
-                WHERE url = ?
-                AND status = 'processing'
-                AND worker_id = ?
-            """, (url, worker_id))
-
-            self.db.commit()
-            return cursor.rowcount == 1
-
-        
     
     def get_stats(self):
+        with self.db_lock:
+            pendentes = self.db.execute("""
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE status = 'pending'
+            """).fetchone()[0]
+
+            processing = self.db.execute("""
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE status = 'processing'
+            """).fetchone()[0]
+
+            concluidas = self.db.execute("""
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE status = 'done'
+            """).fetchone()[0]
+
         with self.stats_lock:
             stats = {
                 "urls_submetidos": self.urls_submetidos,
-                "urls_na_fila": self.urls_na_fila,
+                "urls_na_fila": pendentes,
+                "urls_em_processamento": processing,
+                "urls_concluidas": concluidas,
                 "pesquisas": self.pesquisas,
                 "downloads": self.downloads,
                 "erros": self.erros
             }
+
         ativos = 0
 
         for nome in self.barrel_names:
@@ -178,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
->>>>>>> Stashed changes

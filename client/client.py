@@ -1,5 +1,3 @@
-<<<<<<< Updated upstream
-=======
 import Pyro5.api
 import time
 import os
@@ -72,7 +70,7 @@ while True:
     print("4 - Estatísticas")
     print("5 - Sair")
     opcao = input("> ")
-    if opcao == "4":
+    if opcao == "5":
         break
     try:
         gateway = Pyro5.api.Proxy("PYRONAME:gateway")
@@ -89,5 +87,3 @@ while True:
         print("ERRO: ", e)
 
 
-
->>>>>>> Stashed changes
