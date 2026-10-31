@@ -10,35 +10,19 @@ from collections import OrderedDict
 class Gateway:
     def __init__(self):
         self.barrel_names = ["barrel1", "barrel2"]
-        
-        self.urls_submetidos = 0
-        self.pesquisas = 0
-        self.downloads = 0
-        self.erros = 0
-        self.urls_na_fila = 0
-        self.ultimas_pesquisas = []
-        self.cache_resultados = OrderedDict()
-        self.cache_limite = 100
-        self.cache_validade = 300
-        
-        self.cache_lock = threading.Lock()
-        self.cache_hits = 0
-        self.cache_misses = 0
-
+        self.contagem = {}
+        self.tempos = {}
+        self.stats_callbacks = []
+        self.ultimas_stats = {}
         self.stats_lock = threading.Lock()
+        self.mudou = threading.Event()
         self.db_lock = threading.Lock()
         self.db=sqlite3.connect("gateway.db", check_same_thread=False, timeout=10)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS tasks (url TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', claimed_at REAL, worker_id TEXT, attempts INTEGER NOT NULL DEFAULT 0)")
         with self.db_lock:
             self.db.execute("DELETE FROM tasks WHERE TRIM(url) = ''")
-        self.stats_callbacks = []
-        self.cached_stats = {}
-        self.atualizar_stats()
-        self.db.commit()
-        
-        
-        
+            self.db.commit()
 
     def chamar_barrel(self, metodo, *args):
         nomes = self.barrel_names[:]
@@ -46,95 +30,37 @@ class Gateway:
         for nome in nomes:
             try:
                 with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                    return getattr(barrel, metodo)(*args)
+                    inicio = time.time()
+                    resultado = getattr(barrel, metodo)(*args)
+                if metodo == "search":
+                    self.registar_tempo(nome, (time.time() - inicio) * 10)
+                return resultado
             except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError):
                 print(nome, "falhou")
         raise Exception("Nenhum SB disponível")
 
+    def registar_tempo(self, nome, decimas):
+        with self.stats_lock:
+            total, n = self.tempos.get(nome, (0, 0))
+            self.tempos[nome] = (total + decimas, n + 1)
 
     def search(self, terms, page=0):
-        if page == 0:
-            pesquisa = " ".join(terms) if isinstance(terms, (list, tuple)) else str(terms)
-
+        if page == 0 and terms:
+            pesquisa = " ".join(terms).lower()
             with self.stats_lock:
-                self.pesquisas += 1
-                self.ultimas_pesquisas.insert(0, pesquisa)
-                self.ultimas_pesquisas = self.ultimas_pesquisas[:10]
-
-        # Criar uma chave consistente para a pesquisa
-        termos_chave = tuple(terms) if isinstance(terms, (list, tuple)) else (str(terms),)
-        chave = (termos_chave, page)
-
-        agora = time.time()
-
-        with self.cache_lock:
-            if chave in self.cache_resultados:
-                resultados, timestamp = self.cache_resultados[chave]
-
-                if agora - timestamp < self.cache_validade:
-                    self.cache_resultados.move_to_end(chave)
-                    self.cache_hits += 1
-                    encontrado = True
-                else:
-                    del self.cache_resultados[chave]
-                    encontrado = False
-            else:
-                encontrado = False
-
-            if not encontrado:
-                self.cache_misses += 1
-
-        if encontrado:
-            print("CACHE HIT:", chave)
-            self.atualizar_stats()
-            return resultados
-
-        print("CACHE MISS:", chave)
-
+                self.contagem[pesquisa] = self.contagem.get(pesquisa, 0) + 1
         resultados = self.chamar_barrel("search", terms, page)
-
-        with self.cache_lock:
-            self.cache_resultados[chave] = (resultados, time.time())
-            self.cache_resultados.move_to_end(chave)
-
-            while len(self.cache_resultados) > self.cache_limite:
-                self.cache_resultados.popitem(last=False)
-
-        self.atualizar_stats()
+        self.mudou.set()
         return resultados
-
 
     def get_backlinks(self, url):
         return self.chamar_barrel("get_backlinks", url)
 
-    def chamar_primario(self, metodo, *args):
-        for nome in self.barrel_names:
-            try:
-                with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                    return getattr(barrel, metodo)(*args)
-            except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError):
-                print(nome, "falhou")
-        raise Exception("Nenhum barrel disponivel")
-
-
     def add_url(self, url):
         with self.db_lock:
-            cursor = self.db.execute("""
-                INSERT OR IGNORE INTO tasks (url, status)
-                VALUES (?, 'pending')
-            """, (url,))
+            self.db.execute("INSERT OR IGNORE INTO tasks (url, status) VALUES (?, 'pending')", (url,))
             self.db.commit()
-
-            added = cursor.rowcount > 0
-
-        if added:
-            with self.stats_lock:
-                self.urls_submetidos += 1
-                self.urls_na_fila += 1
-            self.atualizar_stats()
-
         return True
-
 
     def ack_url(self, url, worker_id):
         with self.db_lock:
@@ -147,28 +73,14 @@ class Gateway:
                 AND status = 'processing'
                 AND worker_id = ?
             """, (url, worker_id))
-
             self.db.commit()
-
-            confirmado = cursor.rowcount == 1
-
-        if confirmado:
-            with self.stats_lock:
-                self.downloads += 1
-                
-            with self.cache_lock:
-                self.cache_resultados.clear()
-            self.atualizar_stats()
-
-        return confirmado
+            return cursor.rowcount == 1
 
     def get_url(self, worker_id):
         now = time.time()
         lease_seconds = 30
-
         with self.db_lock:
             self.db.execute("BEGIN IMMEDIATE")
-
             try:
                 self.db.execute("""
                     UPDATE tasks
@@ -178,7 +90,6 @@ class Gateway:
                     WHERE status = 'processing'
                     AND claimed_at < ?
                 """, (now - lease_seconds,))
-
                 row = self.db.execute("""
                     SELECT url
                     FROM tasks
@@ -186,13 +97,10 @@ class Gateway:
                     ORDER BY attempts, url
                     LIMIT 1
                 """).fetchone()
-
                 if row is None:
                     self.db.commit()
                     return None
-
                 url = row[0]
-
                 cursor = self.db.execute("""
                     UPDATE tasks
                     SET status = 'processing',
@@ -202,154 +110,92 @@ class Gateway:
                     WHERE url = ?
                     AND status = 'pending'
                 """, (now, worker_id, url))
-
                 if cursor.rowcount != 1:
                     self.db.rollback()
                     return None
-
                 self.db.commit()
-
             except Exception:
                 self.db.rollback()
                 raise
-
         return url
-    
-    def get_stats(self):
-        with self.db_lock:
-            pendentes = self.db.execute("""
-                SELECT COUNT(*)
-                FROM tasks
-                WHERE status = 'pending'
-            """).fetchone()[0]
 
-            processing = self.db.execute("""
-                SELECT COUNT(*)
-                FROM tasks
-                WHERE status = 'processing'
-            """).fetchone()[0]
-
-            concluidas = self.db.execute("""
-                SELECT COUNT(*)
-                FROM tasks
-                WHERE status = 'done'
-            """).fetchone()[0]
-
-        with self.stats_lock:
-            stats = {
-                "urls_submetidos": self.urls_submetidos,
-                "urls_na_fila": pendentes,
-                "urls_em_processamento": processing,
-                "urls_concluidas": concluidas,
-                "pesquisas": self.pesquisas,
-                "downloads": self.downloads,
-                "erros": self.erros
-            }
-
-        ativos = 0
-
+    def estado_barrels(self):
+        estado = {}
         for nome in self.barrel_names:
             try:
                 with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-                    barrel._pyroBind()
-                    ativos += 1
-                    self.atualizar_stats()
+                    barrel._pyroTimeout = 2
+                    estado[nome] = barrel.get_stats()
             except Exception:
                 pass
+        return estado
 
-        stats["barrels_ativos"] = ativos
-
-        return stats
+    def montar_stats(self):
+        estado = self.estado_barrels()
+        with self.stats_lock:
+            top = sorted(self.contagem.items(), key=lambda x: x[1], reverse=True)[:10]
+            tempos = dict(self.tempos)
+        barrels = []
+        for nome, dados in estado.items():
+            media = None
+            if nome in tempos:
+                total, n = tempos[nome]
+                media = round(total / n, 1)
+            barrels.append({
+                "nome": nome,
+                "paginas": dados["paginas"],
+                "palavras": dados["palavras"],
+                "tempo_medio": media,
+            })
+        return {"top_pesquisas": top, "barrels": barrels}
     
     def atualizar_stats(self):
-        with self.db_lock:
-            pendentes = self.db.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'pending'"
-            ).fetchone()[0]
-
-            processing = self.db.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'processing'"
-            ).fetchone()[0]
-
-            concluidas = self.db.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
-            ).fetchone()[0]
-            
-        
-        with self.cache_lock:
-            hits = self.cache_hits
-            misses = self.cache_misses
-
+        stats = self.montar_stats()
+        if stats == self.ultimas_stats:
+            return
+        self.ultimas_stats = stats
         with self.stats_lock:
-            stats = {
-                "urls_submetidos": self.urls_submetidos,
-                "urls_na_fila": pendentes,
-                "urls_em_processamento": processing,
-                "urls_concluidas": concluidas,
-                "pesquisas": self.pesquisas,
-                "downloads": self.downloads,
-                "erros": self.erros,
-                "barrels": self.barrel_names.copy(),
-                "ultimas_pesquisas": self.ultimas_pesquisas.copy(),
-                "cache_hits": hits,
-                "cache_misses": misses
-            }
-
-            if stats == self.cached_stats:
-                return
-
-            self.cached_stats = stats.copy()
             callbacks = self.stats_callbacks[:]
-            
-        with self.cache_lock:
-            hits = self.cache_hits
-            misses = self.cache_misses
-        
-        print("A enviar estatísticas:", stats)
-        print("Clientes registados:", len(callbacks))
-
-        callbacks_validos = []
-
-        for callback_uri in callbacks:
+        falhados = []
+        for uri in callbacks:
             try:
-                with Pyro5.api.Proxy(callback_uri) as callback:
-                    callback._pyroTimeout = 5
+                with Pyro5.api.Proxy(uri) as callback:
+                    callback._pyroTimeout = 2
                     callback.update_stats(stats)
-
-                callbacks_validos.append(callback_uri)
-                print("Estatísticas enviadas com sucesso.")
-
-            except Exception as e:
-                print("Erro ao notificar cliente:", repr(e))
-
+            except Exception:
+                falhados.append(uri)
         with self.stats_lock:
-            self.stats_callbacks = callbacks_validos
-                
-    def ping(self):
-        return True
+            self.stats_callbacks = [u for u in self.stats_callbacks if u not in falhados]
+
+    def monitor(self):
+        while True:
+            self.mudou.wait(2)
+            self.mudou.clear()
+            try:
+                self.atualizar_stats()
+            except Exception as erro:
+                print("Erro nas estatisticas:", erro)
     
     def registar_callback(self, callback_uri):
         with self.stats_lock:
             if callback_uri not in self.stats_callbacks:
                 self.stats_callbacks.append(callback_uri)
-
-            stats = self.cached_stats.copy()
-
         with Pyro5.api.Proxy(callback_uri) as callback:
             callback._pyroTimeout = 5
-            callback.update_stats(stats)
-
+            callback.update_stats(self.montar_stats())
         print("Novo cliente registado para estatísticas")
-        
-        
-        
+
+    def ping(self):
+        return True
+    
 def main():
+    gateway = Gateway()
+    threading.Thread(target=gateway.monitor, daemon=True).start()
     daemon = Pyro5.api.Daemon()
     uri = daemon.register(Gateway())
     Pyro5.api.locate_ns().register("gateway", uri)
-    print("gateway pronto")
+    print("Gateway pronto")
     daemon.requestLoop()
-
 
 if __name__ == "__main__":
     main()
