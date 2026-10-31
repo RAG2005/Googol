@@ -133,10 +133,20 @@ def registar_erro(self):
     print("Erro registado nas estatísticas.")
 
 
-def backlinks(gateway):
-    url =input("URL: ")
-    for u in gateway.get_backlinks(url):
-        print(u)
+def backlinks():
+    url = input("URL: ").strip()
+
+    if not url:
+        print("URL inválido.")
+        return
+
+    resultados = chamar_gateway("get_backlinks", url)
+
+    if resultados:
+        for u in resultados:
+            print(u)
+    else:
+        print("Não foram encontrados backlinks.")
 
 def indexar_url():
     url = input("URL: ")

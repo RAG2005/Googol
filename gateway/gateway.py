@@ -4,6 +4,7 @@ import threading
 import sqlite3
 import time
 import os
+from collections import OrderedDict
 
 @Pyro5.api.expose
 class Gateway:
@@ -16,7 +17,14 @@ class Gateway:
         self.erros = 0
         self.urls_na_fila = 0
         self.ultimas_pesquisas = []
+        self.cache_resultados = OrderedDict()
+        self.cache_limite = 100
+        self.cache_validade = 300
         
+        self.cache_lock = threading.Lock()
+        self.cache_hits = 0
+        self.cache_misses = 0
+
         self.stats_lock = threading.Lock()
         self.db_lock = threading.Lock()
         self.db=sqlite3.connect("gateway.db", check_same_thread=False, timeout=10)
@@ -43,6 +51,7 @@ class Gateway:
                 print(nome, "falhou")
         raise Exception("Nenhum SB disponível")
 
+
     def search(self, terms, page=0):
         if page == 0:
             pesquisa = " ".join(terms) if isinstance(terms, (list, tuple)) else str(terms)
@@ -52,15 +61,51 @@ class Gateway:
                 self.ultimas_pesquisas.insert(0, pesquisa)
                 self.ultimas_pesquisas = self.ultimas_pesquisas[:10]
 
+        # Criar uma chave consistente para a pesquisa
+        termos_chave = tuple(terms) if isinstance(terms, (list, tuple)) else (str(terms),)
+        chave = (termos_chave, page)
+
+        agora = time.time()
+
+        with self.cache_lock:
+            if chave in self.cache_resultados:
+                resultados, timestamp = self.cache_resultados[chave]
+
+                if agora - timestamp < self.cache_validade:
+                    self.cache_resultados.move_to_end(chave)
+                    self.cache_hits += 1
+                    encontrado = True
+                else:
+                    del self.cache_resultados[chave]
+                    encontrado = False
+            else:
+                encontrado = False
+
+            if not encontrado:
+                self.cache_misses += 1
+
+        if encontrado:
+            print("CACHE HIT:", chave)
             self.atualizar_stats()
+            return resultados
 
-        return self.chamar_barrel("search", terms, page)
+        print("CACHE MISS:", chave)
 
-    def backlinks():
-        url = input("URL: ")
+        resultados = self.chamar_barrel("search", terms, page)
 
-        for u in chamar_gateway("get_backlinks", url):
-            print(u)
+        with self.cache_lock:
+            self.cache_resultados[chave] = (resultados, time.time())
+            self.cache_resultados.move_to_end(chave)
+
+            while len(self.cache_resultados) > self.cache_limite:
+                self.cache_resultados.popitem(last=False)
+
+        self.atualizar_stats()
+        return resultados
+
+
+    def get_backlinks(self, url):
+        return self.chamar_barrel("get_backlinks", url)
 
     def chamar_primario(self, metodo, *args):
         for nome in self.barrel_names:
@@ -110,6 +155,9 @@ class Gateway:
         if confirmado:
             with self.stats_lock:
                 self.downloads += 1
+                
+            with self.cache_lock:
+                self.cache_resultados.clear()
             self.atualizar_stats()
 
         return confirmado
@@ -226,6 +274,11 @@ class Gateway:
             concluidas = self.db.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'done'"
             ).fetchone()[0]
+            
+        
+        with self.cache_lock:
+            hits = self.cache_hits
+            misses = self.cache_misses
 
         with self.stats_lock:
             stats = {
@@ -237,7 +290,9 @@ class Gateway:
                 "downloads": self.downloads,
                 "erros": self.erros,
                 "barrels": self.barrel_names.copy(),
-                "ultimas_pesquisas": self.ultimas_pesquisas.copy()
+                "ultimas_pesquisas": self.ultimas_pesquisas.copy(),
+                "cache_hits": hits,
+                "cache_misses": misses
             }
 
             if stats == self.cached_stats:
@@ -245,7 +300,11 @@ class Gateway:
 
             self.cached_stats = stats.copy()
             callbacks = self.stats_callbacks[:]
-
+            
+        with self.cache_lock:
+            hits = self.cache_hits
+            misses = self.cache_misses
+        
         print("A enviar estatísticas:", stats)
         print("Clientes registados:", len(callbacks))
 
