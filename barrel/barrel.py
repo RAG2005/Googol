@@ -141,13 +141,16 @@ class Barrel:
                 self.load_data()
             print("sincronizado com", nome)
 
+    def get_stats(self):
+        return {"paginas": len(self.pages), "palavras": len(self.index)}
+    
 def main(name):
     barrel = Barrel(name + ".db")
+    barrel.sincronizar([n for n in barrels if n != name])
     daemon = Pyro5.api.Daemon()
     uri = daemon.register(barrel)
     ns = Pyro5.api.locate_ns().register(name, uri)
     print(name, "pronto")
-    barrel.sincronizar([n for n in barrels if n != name])
     daemon.requestLoop()
 
 if __name__ == "__main__":

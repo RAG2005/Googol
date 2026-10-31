@@ -7,129 +7,55 @@ import socket
 import uuid
 
 worker_id = f"{socket.gethostname()}-{uuid.uuid4()}"
+barrels = ["barrel1", "barrel2"]
+pendentes = []
 
 def processar_pagina(url):
-    print("A processar:", url)
-
     try:
-        resposta = requests.get(
-            url,
-            timeout=(5, 10),
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
-
-        print("HTTP:", resposta.status_code)
-
-    except requests.exceptions.Timeout as erro:
-        print("TIMEOUT no download:", url, repr(erro))
-        return None
-
-    except requests.exceptions.RequestException as erro:
-        print("ERRO HTTP:", url, repr(erro))
-        return None
-
-    except Exception as erro:
-        print("ERRO inesperado no download:", url, repr(erro))
-        return None
-
-    if resposta.status_code != 200:
-        print("HTTP diferente de 200:", resposta.status_code)
-        return None
-
-    content_type = resposta.headers.get("Content-Type", "")
-
-    if "text/html" not in content_type.lower():
-        print("Content-Type inválido:", content_type)
-        return None
-
-    try:
+        resposta = requests.get(url, timeout=10)
+        if resposta.status_code != 200:
+            return None
+        if "text/html" not in resposta.headers.get("Content-Type", ""):
+            return None
         soup = BeautifulSoup(resposta.text, "lxml")
-
         for tag in soup(["script", "style"]):
             tag.decompose()
-
         if soup.title and soup.title.string:
             titulo = soup.title.string.strip()
         else:
             titulo = url
-
         texto = soup.get_text(" ")
-
         palavras = []
-
         for p in texto.split():
             p = p.lower().strip(".,;:!?()\"'")
-
             if p:
                 palavras.append(p)
-
         citacao = " ".join(texto.split())[:150]
-
         links = set()
-
         for a in soup.find_all("a", href=True):
-            link = urldefrag(
-                urljoin(url, a["href"])
-            )[0]
-
+            link = urldefrag(urljoin(url, a["href"]))[0]
             if link.startswith("http"):
                 links.add(link)
-
-        print(
-            "Página processada:",
-            len(palavras),
-            "palavras,",
-            len(links),
-            "links"
-        )
-
         return titulo, citacao, palavras, list(links)
-
-    except Exception as erro:
-        print("ERRO ao processar HTML:", repr(erro))
+    except Exception:
         return None
-
-barrels = ["barrel1", "barrel2"]
-pendentes = []
 
 def enviar(nome, url, titulo, citacao, palavras, links):
     try:
-        print("A enviar para", nome, ":", url)
-
         with Pyro5.api.Proxy("PYRONAME:" + nome) as barrel:
-            resultado = barrel.add_page(
-                url,
-                titulo,
-                citacao,
-                palavras,
-                links
-            )
-
-        print("Resposta do", nome, ":", resultado)
-
-        return resultado
-
-    except Exception as erro:
-        print(
-            "ERRO ao enviar para",
-            nome,
-            ":",
-            repr(erro)
-        )
-
+            return barrel.add_page(url, titulo, citacao, palavras, links)
+    except Exception:
         return False
 
 def enviar_aos_barrels(url, titulo, citacao, palavras, links):
-    sucesso = True
+    confirmados = 0
     for nome in barrels:
-        if not enviar(nome, url, titulo, citacao, palavras, links):
+        if enviar(nome, url, titulo, citacao, palavras, links):
+            confirmados += 1
+        else:
             print(nome, "sem ACK, fica pendente")
             pendentes.append((nome, url, titulo, citacao, palavras, links))
-            sucesso = False
-    
-    return sucesso
+    return confirmados > 0
 
 def reenviar_pendentes():
     for item in pendentes[:]:
@@ -139,89 +65,35 @@ def reenviar_pendentes():
             print("reenviado a", nome)
 
 def tratar_url(gateway, url):
-    print("\n==============================")
-    print("PROCESSANDO:", url)
-    print("==============================")
-
     resultado = processar_pagina(url)
-
     if resultado is None:
-        print("FALHOU NO DOWNLOAD/PROCESSAMENTO")
+        print("Falhou:", url)
         return False
-
     titulo, citacao, palavras, links = resultado
-
-    print("A enviar página aos Barrels...")
-
-    if not enviar_aos_barrels(
-        url,
-        titulo,
-        citacao,
-        palavras,
-        links
-    ):
-        print("FALHOU NO ENVIO AOS BARRELS")
+    if not enviar_aos_barrels(url, titulo, citacao, palavras, links):
+        print("Nenhum barrel confirmou:", url)
         return False
-
-    print("Página guardada nos Barrels.")
-
     for link in links:
-        try:
-            gateway.add_url(link)
-        except Exception as erro:
-            print("Erro ao adicionar link:", link, repr(erro))
-
-    print("TAREFA CONCLUÍDA:", url)
-
+        gateway.add_url(link)
     return True
 
+def um_ciclo():
+    with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+        url = gateway.get_url(worker_id)
+        if url is None:
+            time.sleep(1)
+        elif tratar_url(gateway, url):
+            gateway.ack_url(url, worker_id)
+            print("Concluido:", url)
 
 def main():
     while True:
+        reenviar_pendentes()
         try:
-            with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
-                url = gateway.get_url(worker_id)
-
-                if url is None:
-                    time.sleep(1)
-                    continue
-
-                try:
-                    concluido = tratar_url(gateway, url)
-
-                    if concluido:
-                        confirmado = gateway.ack_url(
-                            url, worker_id
-                        )
-
-                        if confirmado:
-                            print("Concluído:", url)
-                        else:
-                            print(
-                                "Tarefa já não pertence a este worker:",
-                                url
-                            )
-
-                    else:
-                        print(
-                            "Tarefa será recuperada após o timeout:",
-                            url
-                        )
-
-                except Exception as erro:
-                    print("Erro a processar", url, erro)
-
-        except (Pyro5.errors.CommunicationError,
-                Pyro5.errors.NamingError) as erro:
-            print("Gateway indisponível:", erro)
-            time.sleep(3)
-
+            um_ciclo()
         except Exception as erro:
-            print("Erro inesperado:", erro)
+            print("Erro:", erro)
             time.sleep(2)
-
-
-
-
+            
 if __name__ == "__main__":
     main()

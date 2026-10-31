@@ -1,12 +1,15 @@
 import Pyro5.api
 import time
 import os
+import queue
+import threading
+import Pyro5.errors
 
-def pesquisar(gateway):
+def pesquisar():
     terms = input("Termos: ").split()
     page = 0
     while True:
-        resultados = gateway.search(terms, page)
+        resultados = chamar_gateway("search", terms, page)
         if not resultados:
             print("Sem resultados")
             return
@@ -19,49 +22,108 @@ def pesquisar(gateway):
         if input("[n] página seguinte [ENTER] voltar: ") != "n":
             return
         page +=1
+
+@Pyro5.api.expose
+class StatsCallback:
+    def __init__(self):
+        self.fila = queue.Queue()
+
+    def update_stats(self, stats):
+        self.fila.put(stats)
+
+def mostrar(stats):
+    os.system("cls" if os.name == "nt" else "clear")
+    print("========== ESTATÍSTICAS ==========")
+    print("\n10 pesquisas mais comuns:")
+    if stats["top_pesquisas"]:
+        for i, (pesquisa, vezes) in enumerate(stats["top_pesquisas"], 1):
+            print(f"{i}. {pesquisa} ({vezes}x)")
+    else:
+        print("Ainda não foram efetuadas pesquisas.")
+    print("\nBarrels ativos:")
+    if stats["barrels"]:
+        for b in stats["barrels"]:
+            if b["tempo_medio"] is None:
+                tempo = "sem pesquisas"
+            else:
+                tempo = f"{b['tempo_medio']} décimas de segundo"
+            print(f"- {b['nome']}: {b['paginas']} páginas, {b['palavras']} palavras, tempo médio {tempo}")
+    else:
+        print("Nenhum Barrel ativo.")
+    print("\nPrima CTRL+C para voltar ao menu.")
         
-def estatisticas(gateway):
+def estatisticas():
+    callback = StatsCallback()
+    daemon = Pyro5.api.Daemon(host="localhost")
+    callback_uri = daemon.register(callback)
+    thread = threading.Thread(
+        target=daemon.requestLoop,
+        daemon=True
+    )
+    thread.start()
+    ligado = False
+    try:
+        while True:
+            # Registar ou voltar a registar o callback
+            if not ligado:
+                try:
+                    with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                        gateway._pyroTimeout = 5
+                        gateway.registar_callback(str(callback_uri))
+                    ligado = True
+                    print("Ligação ao Gateway estabelecida.")
+                except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError, TimeoutError) as erro:
+                    print("Gateway indisponível:", erro)
+                    print("Nova tentativa em 3 segundos...")
+                    time.sleep(3)
+                    continue
+            try:
+                mostrar(callback.fila.get(timeout=3))
+            except queue.Empty:
+                # Verificar se o Gateway continua ligado
+                try:
+                    with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                        gateway._pyroTimeout = 5
+                        gateway.ping()
+                except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError, TimeoutError):
+                    print("\nGateway desligado! A tentar restabelecer ligação...")
+                    ligado = False
+    except KeyboardInterrupt:
+        print("\nA voltar ao menu...")
+    finally:
+        daemon.shutdown()
+        daemon.close()
+
+def backlinks():
+    url = input("URL: ").strip()
+    if not url:
+        print("URL inválido.")
+        return
+    resultados = chamar_gateway("get_backlinks", url)
+    if resultados:
+        for u in resultados:
+            print(u)
+    else:
+        print("Não foram encontrados backlinks.")
+
+def indexar_url():
+    url = input("URL: ")
+    if not url.startswith("http://") and not url.startswith("https://"):
+        print("URL inválido ou nulo.")
+        return
+    chamar_gateway("add_url", url)
+    print("URL enviado")
+    
+def chamar_gateway(metodo, *args):
     while True:
         try:
-            stats = gateway.get_stats()
-
-            os.system("cls" if os.name == "nt" else "clear")
-
-            print("========== ESTATÍSTICAS ==========")
-            print()
-            print("URLs submetidos: ", stats["urls_submetidos"])
-            print("URLs na fila:    ", stats["urls_na_fila"])
-            print("Pesquisas:       ", stats["pesquisas"])
-            print("Downloads:       ", stats["downloads"])
-            print("Erros:            ", stats["erros"])
-            print("Barrels ativos:  ", stats["barrels_ativos"])
-            print()
-            print("Atualização automática a cada 1 segundo.")
-            print("Prima CTRL+C para voltar ao menu.")
-
-            time.sleep(1)
-
-        except KeyboardInterrupt:
-            print()
-            return
-
-        except Exception as e:
-            print("Erro ao obter estatísticas:", e)
-            return
-        
-
-
-
-
-def backlinks(gateway):
-    url =input("URL: ")
-    for u in gateway.get_backlinks(url):
-        print(u)
-
-def indexar_url(gateway):
-    url = input("URL: ")
-    gateway.add_url(url)
-    print("URL enviado")
+            with Pyro5.api.Proxy("PYRONAME:gateway") as gateway:
+                gateway._pyroTimeout = 5
+                return getattr(gateway, metodo)(*args)
+        except (Pyro5.errors.CommunicationError, Pyro5.errors.NamingError, TimeoutError) as erro:
+            print("\nGateway indisponível:", erro)
+            print("Nova tentativa em 3 segundos...")
+            time.sleep(3)
 
 while True:
     print("1 - Pesquisar")
@@ -73,17 +135,15 @@ while True:
     if opcao == "5":
         break
     try:
-        gateway = Pyro5.api.Proxy("PYRONAME:gateway")
         if opcao == "1":
-            pesquisar(gateway)
+            pesquisar()
         elif opcao == "2":
-            backlinks(gateway)
+            backlinks()
         elif opcao == "3":
-            indexar_url(gateway)
+            indexar_url()
         elif opcao == "4":
-            estatisticas(gateway)
-        
+            estatisticas()
+    except KeyboardInterrupt:
+        print("\nOperação cancelada.")
     except Exception as e:
-        print("ERRO: ", e)
-
-
+        print("ERRO:", e)
