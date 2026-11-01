@@ -192,7 +192,7 @@ def main():
     gateway = Gateway()
     threading.Thread(target=gateway.monitor, daemon=True).start()
     daemon = Pyro5.api.Daemon()
-    uri = daemon.register(Gateway())
+    uri = daemon.register(gateway)
     Pyro5.api.locate_ns().register("gateway", uri)
     print("Gateway pronto")
     daemon.requestLoop()

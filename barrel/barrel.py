@@ -3,6 +3,7 @@ import Pyro5.api
 import threading
 import sqlite3
 import stopwordsiso
+
 STOP_WORDS = stopwordsiso.stopwords(["pt", "en"])
 barrels = ["barrel1", "barrel2"]
 
@@ -14,28 +15,20 @@ class Barrel:
         self.db.execute("CREATE TABLE IF NOT EXISTS pages (url TEXT PRIMARY KEY, title TEXT, snippet TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS words (word TEXT, url TEXT, PRIMARY KEY (word, url))")
         self.db.execute("CREATE TABLE IF NOT EXISTS backlinks (link TEXT, url TEXT, PRIMARY KEY (link, url))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS seen (url TEXT PRIMARY KEY)")
-        self.db.execute("CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT UNIQUE)")
         self.db.commit()
         self.lock = threading.Lock()
         self.load_data()
-        
+
     def load_data(self):
         self.index = {}
         self.pages = {}
         self.backlinks = {}
-        self.por_visitar = []
-        self.vistos = set()
         for url, title, snippet in self.db.execute("SELECT url, title, snippet FROM pages"):
             self.pages[url] = {"title": title, "snippet": snippet}
         for word, url in self.db.execute("SELECT word, url FROM words"):
             self.index.setdefault(word, set()).add(url)
         for link, url in self.db.execute("SELECT link, url FROM backlinks"):
             self.backlinks.setdefault(link, set()).add(url)
-        for row in self.db.execute("SELECT url FROM seen"):
-            self.vistos.add(row[0])
-        for row in self.db.execute("SELECT url FROM queue ORDER BY id"):
-            self.por_visitar.append(row[0])
 
     def add_page(self, url, title, snippet, words, links):
         with self.lock:
@@ -76,45 +69,12 @@ class Barrel:
         with self.lock:
             return list(self.backlinks.get(url, []))
 
-    def add_url(self, url):
-        with self.lock:
-            if url in self.vistos:
-                return True
-            self.db.execute("INSERT INTO seen VALUES (?)", (url,))
-            self.db.execute("INSERT INTO queue (url) VALUES (?)", (url,))
-            self.db.commit()
-            self.vistos.add(url)
-            self.por_visitar.append(url)
-            return True
-
-    def get_url(self):
-        with self.lock:
-            if not self.por_visitar:
-                return None
-            url = self.por_visitar.pop(0)
-            self.db.execute("DELETE FROM queue WHERE url = ?", (url,))
-            self.db.commit()
-            return url
-
-    def remover_url(self, url):
-        with self.lock:
-            if url in self.por_visitar:
-                self.por_visitar.remove(url)
-                self.db.execute("DELETE FROM queue WHERE url = ?", (url,))
-            if url not in self.vistos:
-                self.vistos.add(url)
-                self.db.execute("INSERT INTO seen VALUES (?)", (url,))
-            self.db.commit()
-            return True
-
     def get_estado(self):
         with self.lock:
             return {
                 "pages": self.db.execute("SELECT url, title, snippet FROM pages").fetchall(),
                 "words": self.db.execute("SELECT word, url FROM words").fetchall(),
                 "backlinks": self.db.execute("SELECT link, url FROM backlinks").fetchall(),
-                "seen": self.db.execute("SELECT url FROM seen").fetchall(),
-                "queue": self.db.execute("SELECT url FROM queue ORDER BY id").fetchall(),
             }
 
     def sincronizar(self, outros):
@@ -132,24 +92,19 @@ class Barrel:
                 for linha in estado["backlinks"]:
                     self.db.execute("INSERT OR IGNORE INTO backlinks VALUES (?, ?)", linha)
                 self.db.commit()
-            for linha in estado["queue"]:
-                self.add_url(linha[0])
             with self.lock:
-                for linha in estado["seen"]:
-                    self.db.execute("INSERT OR IGNORE INTO seen VALUES (?)", linha)
-                self.db.commit()
                 self.load_data()
             print("sincronizado com", nome)
 
     def get_stats(self):
         return {"paginas": len(self.pages), "palavras": len(self.index)}
-    
+
 def main(name):
     barrel = Barrel(name + ".db")
     barrel.sincronizar([n for n in barrels if n != name])
     daemon = Pyro5.api.Daemon()
     uri = daemon.register(barrel)
-    ns = Pyro5.api.locate_ns().register(name, uri)
+    Pyro5.api.locate_ns().register(name, uri)
     print(name, "pronto")
     daemon.requestLoop()
 

@@ -54,7 +54,7 @@ def mostrar(stats):
         
 def estatisticas():
     callback = StatsCallback()
-    daemon = Pyro5.api.Daemon(host="localhost")
+    daemon = Pyro5.api.Daemon()
     callback_uri = daemon.register(callback)
     thread = threading.Thread(
         target=daemon.requestLoop,
